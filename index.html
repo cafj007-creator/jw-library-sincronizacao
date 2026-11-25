@@ -49,6 +49,11 @@
     }
     .btn:disabled { opacity: 0.45; cursor: not-allowed; }
     .btn:hover:not(:disabled) { background: var(--primary-hover); }
+    .btn-share {
+      width: 100%; padding: 14px; border: none; border-radius: 10px;
+      background: var(--success); color: #042f2e; font-weight: 700; font-size: 1rem;
+      cursor: pointer; transition: 0.2s; margin-top: 10px; display: none;
+    }
     .btn-clear {
       background: transparent; border: 1px solid var(--border); color: var(--muted);
       padding: 8px 12px; border-radius: 8px; cursor: pointer; font-size: 0.82rem; margin-top: 8px;
@@ -74,7 +79,7 @@
       <div class="dropzone" id="dropzone">
         <strong>Toque para selecionar arquivos .jwlibrary</strong><br/>
         <span style="font-size: 0.82rem; color: var(--muted);">Pode escolher vários arquivos de uma vez (inclusive do Google Drive)</span>
-        <input type="file" id="fileInput" accept=".jwlibrary" multiple hidden />
+        <input type="file" id="fileInput" multiple hidden />
       </div>
 
       <ul class="file-list" id="fileList"></ul>
@@ -82,22 +87,25 @@
         <button class="btn-clear" id="clearBtn" style="display:none;">Limpar lista</button>
       </div>
 
-      <button class="btn" id="mergeBtn" disabled>Mesclar Backups e Baixar</button>
+      <button class="btn" id="mergeBtn" disabled>Mesclar Backups</button>
+      <button class="btn-share" id="shareBtn">📤 Abrir no JW Library / Salvar no Drive</button>
       <div class="log" id="logBox"></div>
     </div>
   </div>
 
   <script>
-    // Registra Service Worker para funcionar offline como PWA
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('./sw.js').catch(() => {});
     }
 
     let selectedFiles = [];
+    let lastGeneratedFile = null;
+
     const dropzone = document.getElementById('dropzone');
     const fileInput = document.getElementById('fileInput');
     const fileList = document.getElementById('fileList');
     const mergeBtn = document.getElementById('mergeBtn');
+    const shareBtn = document.getElementById('shareBtn');
     const clearBtn = document.getElementById('clearBtn');
     const logBox = document.getElementById('logBox');
 
@@ -113,14 +121,16 @@
 
     clearBtn.addEventListener('click', () => {
       selectedFiles = [];
+      lastGeneratedFile = null;
       fileInput.value = '';
+      shareBtn.style.display = 'none';
       renderList();
       logBox.style.display = 'none';
     });
 
     function addFiles(files) {
       for (const f of files) {
-        if (f.name.endsWith('.jwlibrary') && !selectedFiles.some(x => x.name === f.name && x.size === f.size)) {
+        if (f.name.toLowerCase().endsWith('.jwlibrary') && !selectedFiles.some(x => x.name === f.name && x.size === f.size)) {
           selectedFiles.push(f);
         }
       }
@@ -143,7 +153,6 @@
       logBox.textContent += msg + '\n';
     }
 
-    // Utilitário para consultar linhas como objetos
     function queryAll(db, sql, params = []) {
       const stmt = db.prepare(sql);
       stmt.bind(params);
@@ -162,8 +171,36 @@
       return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
     }
 
+    function baixarArquivo(fileObj) {
+      const url = URL.createObjectURL(fileObj);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileObj.name;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    }
+
+    shareBtn.addEventListener('click', async () => {
+      if (!lastGeneratedFile) return;
+      if (navigator.canShare && navigator.canShare({ files: [lastGeneratedFile] })) {
+        try {
+          await navigator.share({
+            files: [lastGeneratedFile],
+            title: lastGeneratedFile.name
+          });
+        } catch (e) {
+          if (e.name !== 'AbortError') baixarArquivo(lastGeneratedFile);
+        }
+      } else {
+        baixarArquivo(lastGeneratedFile);
+      }
+    });
+
     mergeBtn.addEventListener('click', async () => {
       mergeBtn.disabled = true;
+      shareBtn.style.display = 'none';
       logBox.textContent = '';
       log('Iniciando motor SQLite...');
 
@@ -172,7 +209,6 @@
           locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/${file}`
         });
 
-        // Ordena pelo mais recente primeiro
         const sorted = [...selectedFiles].sort((a, b) => b.lastModified - a.lastModified);
         const zipBase = await JSZip.loadAsync(sorted[0]);
         const dbBaseBytes = await zipBase.file('userData.db').async('uint8array');
@@ -181,7 +217,6 @@
         const dbOut = new SQL.Database(dbBaseBytes);
         const zipOut = new JSZip();
 
-        // Copia mídias e miniaturas do base
         for (const [name, entry] of Object.entries(zipBase.files)) {
           if (!entry.dir && !name.startsWith('userData.db') && name !== 'manifest.json') {
             zipOut.file(name, await entry.async('uint8array'));
@@ -358,13 +393,16 @@
         zipOut.file('userData.db', finalDbBytes);
         zipOut.file('manifest.json', JSON.stringify(manifestBase));
 
-        const blob = await zipOut.generateAsync({ type: 'blob', compression: 'DEFLATE' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = nomeFinal;
-        a.click();
-        URL.revokeObjectURL(url);
+        // Gera como Uint8Array com MIME genérico para o Chrome Android não forçar extensão .zip
+        const zipBytes = await zipOut.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+        lastGeneratedFile = new File([zipBytes], nomeFinal, { type: 'application/octet-stream' });
+
+        baixarArquivo(lastGeneratedFile);
+
+        // Exibe botão de compartilhamento nativo no celular/tablet
+        if (navigator.canShare && navigator.canShare({ files: [lastGeneratedFile] })) {
+          shareBtn.style.display = 'block';
+        }
 
         log('----------------------------------------');
         log('✅ MESCLAGEM CONCLUÍDA COM SUCESSO!');
@@ -372,7 +410,8 @@
         log(` + Notas atualizadas  : ${totalNotasUpd}`);
         log(` + Etiquetas novas    : ${totalTagsAdd}`);
         log(` + Marcações novas    : ${totalUmsAdd}`);
-        log(`📥 Download iniciado  : ${nomeFinal}`);
+        log(`📥 Arquivo gerado     : ${nomeFinal}`);
+        log('💡 Dica celular: Se o Chrome adicionar ".zip" no download, use o botão verde acima para enviar direto ao JW Library ou Drive.');
       } catch (err) {
         log('❌ Erro ao processar: ' + err.message);
       } finally {
