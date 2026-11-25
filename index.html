@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#4f46e5" />
+  <title>Sincronizador JW Library</title>
+  <link rel="manifest" href="manifest.json" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.js"></script>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --primary: #6366f1;
+      --primary-hover: #4f46e5;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --success: #10b981;
+    }
+    * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
+    body {
+      margin: 0; padding: 20px; background: var(--bg); color: var(--text);
+      display: flex; justify-content: center; min-height: 100vh;
+    }
+    .container { width: 100%; max-width: 540px; }
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 16px; padding: 24px; box-shadow: 0 10px 25px rgba(0,0,0,0.3);
+    }
+    h1 { margin: 0 0 8px; font-size: 1.4rem; }
+    p.sub { margin: 0 0 20px; color: var(--muted); font-size: 0.92rem; line-height: 1.4; }
+    .dropzone {
+      border: 2px dashed var(--border); border-radius: 12px; padding: 28px 16px;
+      text-align: center; cursor: pointer; transition: 0.2s; background: rgba(15,23,42,0.4);
+    }
+    .dropzone:hover, .dropzone.drag { border-color: var(--primary); background: rgba(99,102,241,0.08); }
+    .file-list { margin: 16px 0; padding: 0; list-style: none; }
+    .file-list li {
+      background: #0f172a; border: 1px solid var(--border); padding: 10px 12px;
+      border-radius: 8px; margin-bottom: 8px; font-size: 0.88rem;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .btn {
+      width: 100%; padding: 14px; border: none; border-radius: 10px;
+      background: var(--primary); color: white; font-weight: 600; font-size: 1rem;
+      cursor: pointer; transition: 0.2s; margin-top: 8px;
+    }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn:hover:not(:disabled) { background: var(--primary-hover); }
+    .btn-clear {
+      background: transparent; border: 1px solid var(--border); color: var(--muted);
+      padding: 8px 12px; border-radius: 8px; cursor: pointer; font-size: 0.82rem; margin-top: 8px;
+    }
+    .log {
+      margin-top: 18px; background: #090d16; border: 1px solid var(--border);
+      border-radius: 10px; padding: 14px; font-family: monospace; font-size: 0.83rem;
+      white-space: pre-wrap; color: #cbd5e1; display: none; line-height: 1.5;
+    }
+    .badge {
+      display: inline-block; background: rgba(16,185,129,0.15); color: var(--success);
+      padding: 3px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: 600; margin-bottom: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <span class="badge">100% Local &bull; Offline</span>
+      <h1>Sincronizador JW Library</h1>
+      <p class="sub">Selecione 2 ou mais arquivos <strong>.jwlibrary</strong> (Celular, Tablet, PC) para consolidar notas, marcações e etiquetas sem duplicar.</p>
+
+      <div class="dropzone" id="dropzone">
+        <strong>Toque para selecionar arquivos .jwlibrary</strong><br/>
+        <span style="font-size: 0.82rem; color: var(--muted);">Pode escolher vários arquivos de uma vez (inclusive do Google Drive)</span>
+        <input type="file" id="fileInput" accept=".jwlibrary" multiple hidden />
+      </div>
+
+      <ul class="file-list" id="fileList"></ul>
+      <div style="text-align: right;">
+        <button class="btn-clear" id="clearBtn" style="display:none;">Limpar lista</button>
+      </div>
+
+      <button class="btn" id="mergeBtn" disabled>Mesclar Backups e Baixar</button>
+      <div class="log" id="logBox"></div>
+    </div>
+  </div>
+
+  <script>
+    // Registra Service Worker para funcionar offline como PWA
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('./sw.js').catch(() => {});
+    }
+
+    let selectedFiles = [];
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('fileInput');
+    const fileList = document.getElementById('fileList');
+    const mergeBtn = document.getElementById('mergeBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const logBox = document.getElementById('logBox');
+
+    dropzone.addEventListener('click', () => fileInput.click());
+    dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('drag'); });
+    dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag'));
+    dropzone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropzone.classList.remove('drag');
+      addFiles(e.dataTransfer.files);
+    });
+    fileInput.addEventListener('change', (e) => addFiles(e.target.files));
+
+    clearBtn.addEventListener('click', () => {
+      selectedFiles = [];
+      fileInput.value = '';
+      renderList();
+      logBox.style.display = 'none';
+    });
+
+    function addFiles(files) {
+      for (const f of files) {
+        if (f.name.endsWith('.jwlibrary') && !selectedFiles.some(x => x.name === f.name && x.size === f.size)) {
+          selectedFiles.push(f);
+        }
+      }
+      renderList();
+    }
+
+    function renderList() {
+      fileList.innerHTML = '';
+      selectedFiles.forEach((f, idx) => {
+        const li = document.createElement('li');
+        li.innerHTML = `<span>${idx === 0 ? '⭐ [Base]' : '➕'} ${f.name}</span><span style="color:var(--muted)">${(f.size/1024).toFixed(0)} KB</span>`;
+        fileList.appendChild(li);
+      });
+      mergeBtn.disabled = selectedFiles.length < 2;
+      clearBtn.style.display = selectedFiles.length > 0 ? 'inline-block' : 'none';
+    }
+
+    function log(msg) {
+      logBox.style.display = 'block';
+      logBox.textContent += msg + '\n';
+    }
+
+    // Utilitário para consultar linhas como objetos
+    function queryAll(db, sql, params = []) {
+      const stmt = db.prepare(sql);
+      stmt.bind(params);
+      const rows = [];
+      while (stmt.step()) rows.push(stmt.getAsObject());
+      stmt.free();
+      return rows;
+    }
+
+    function getLastInsertId(db) {
+      return db.exec("SELECT last_insert_rowid()")[0].values[0][0];
+    }
+
+    async function sha256Hex(uint8Array) {
+      const hashBuffer = await crypto.subtle.digest('SHA-256', uint8Array);
+      return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    mergeBtn.addEventListener('click', async () => {
+      mergeBtn.disabled = true;
+      logBox.textContent = '';
+      log('Iniciando motor SQLite...');
+
+      try {
+        const SQL = await initSqlJs({
+          locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/${file}`
+        });
+
+        // Ordena pelo mais recente primeiro
+        const sorted = [...selectedFiles].sort((a, b) => b.lastModified - a.lastModified);
+        const zipBase = await JSZip.loadAsync(sorted[0]);
+        const dbBaseBytes = await zipBase.file('userData.db').async('uint8array');
+        const manifestBase = JSON.parse(await zipBase.file('manifest.json').async('string'));
+
+        const dbOut = new SQL.Database(dbBaseBytes);
+        const zipOut = new JSZip();
+
+        // Copia mídias e miniaturas do base
+        for (const [name, entry] of Object.entries(zipBase.files)) {
+          if (!entry.dir && !name.startsWith('userData.db') && name !== 'manifest.json') {
+            zipOut.file(name, await entry.async('uint8array'));
+          }
+        }
+
+        let totalNotasAdd = 0, totalNotasUpd = 0, totalTagsAdd = 0, totalUmsAdd = 0;
+
+        for (let i = 1; i < sorted.length; i++) {
+          log(`Mesclando: ${sorted[i].name}...`);
+          const zipB = await JSZip.loadAsync(sorted[i]);
+          const dbBBytes = await zipB.file('userData.db').async('uint8array');
+          const dbB = new SQL.Database(dbBBytes);
+
+          for (const [name, entry] of Object.entries(zipB.files)) {
+            if (!entry.dir && !name.startsWith('userData.db') && name !== 'manifest.json' && !zipOut.file(name)) {
+              zipOut.file(name, await entry.async('uint8array'));
+            }
+          }
+
+          // 1. LOCATION
+          const locMap = {};
+          const locsExistentes = new Map();
+          const locKey = r => [r.BookNumber, r.ChapterNumber, r.DocumentId, r.Track, r.IssueTagNumber, r.KeySymbol, r.MepsLanguage, r.Type, r.Specialty, r.Edition].join('|');
+
+          queryAll(dbOut, "SELECT * FROM Location").forEach(r => locsExistentes.set(locKey(r), r.LocationId));
+          queryAll(dbB, "SELECT * FROM Location").forEach(r => {
+            const k = locKey(r);
+            if (locsExistentes.has(k)) {
+              locMap[r.LocationId] = locsExistentes.get(k);
+            } else {
+              dbOut.run(`INSERT INTO Location (BookNumber, ChapterNumber, DocumentId, Track, IssueTagNumber, KeySymbol, MepsLanguage, Type, Title, Specialty, Edition)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [r.BookNumber, r.ChapterNumber, r.DocumentId, r.Track, r.IssueTagNumber, r.KeySymbol, r.MepsLanguage, r.Type, r.Title, r.Specialty, r.Edition]);
+              const newId = getLastInsertId(dbOut);
+              locsExistentes.set(k, newId);
+              locMap[r.LocationId] = newId;
+            }
+          });
+
+          // 2. USERMARK & BLOCKRANGE
+          const umMap = {};
+          const umsExistentes = new Map();
+          queryAll(dbOut, "SELECT UserMarkId, UserMarkGuid FROM UserMark").forEach(r => umsExistentes.set(r.UserMarkGuid, r.UserMarkId));
+
+          queryAll(dbB, "SELECT * FROM UserMark").forEach(r => {
+            if (umsExistentes.has(r.UserMarkGuid)) {
+              umMap[r.UserMarkId] = umsExistentes.get(r.UserMarkGuid);
+            } else {
+              const novoLoc = locMap[r.LocationId];
+              if (novoLoc != null) {
+                dbOut.run(`INSERT INTO UserMark (ColorIndex, LocationId, StyleIndex, UserMarkGuid, Version) VALUES (?, ?, ?, ?, ?)`,
+                  [r.ColorIndex, novoLoc, r.StyleIndex, r.UserMarkGuid, r.Version]);
+                const newId = getLastInsertId(dbOut);
+                umsExistentes.set(r.UserMarkGuid, newId);
+                umMap[r.UserMarkId] = newId;
+                totalUmsAdd++;
+
+                queryAll(dbB, "SELECT * FROM BlockRange WHERE UserMarkId = ?", [r.UserMarkId]).forEach(br => {
+                  dbOut.run(`INSERT INTO BlockRange (BlockType, Identifier, StartToken, EndToken, UserMarkId) VALUES (?, ?, ?, ?, ?)`,
+                    [br.BlockType, br.Identifier, br.StartToken, br.EndToken, newId]);
+                });
+              }
+            }
+          });
+
+          // 3. NOTE
+          const noteMap = {};
+          const notesExistentes = new Map();
+          queryAll(dbOut, "SELECT NoteId, Guid, LastModified FROM Note").forEach(r => notesExistentes.set(r.Guid, { id: r.NoteId, mod: r.LastModified || '' }));
+
+          queryAll(dbB, "SELECT * FROM Note").forEach(r => {
+            const novoLoc = r.LocationId != null ? (locMap[r.LocationId] ?? null) : null;
+            const novoUm = r.UserMarkId != null ? (umMap[r.UserMarkId] ?? null) : null;
+
+            if (notesExistentes.has(r.Guid)) {
+              const ex = notesExistentes.get(r.Guid);
+              noteMap[r.NoteId] = ex.id;
+              if ((r.LastModified || '') > ex.mod) {
+                dbOut.run(`UPDATE Note SET UserMarkId=?, LocationId=?, Title=?, Content=?, LastModified=?, BlockType=?, BlockIdentifier=? WHERE NoteId=?`,
+                  [novoUm, novoLoc, r.Title, r.Content, r.LastModified, r.BlockType, r.BlockIdentifier, ex.id]);
+                ex.mod = r.LastModified || '';
+                totalNotasUpd++;
+              }
+            } else {
+              dbOut.run(`INSERT INTO Note (Guid, UserMarkId, LocationId, Title, Content, LastModified, Created, BlockType, BlockIdentifier)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [r.Guid, novoUm, novoLoc, r.Title, r.Content, r.LastModified, r.Created, r.BlockType, r.BlockIdentifier]);
+              const newId = getLastInsertId(dbOut);
+              notesExistentes.set(r.Guid, { id: newId, mod: r.LastModified || '' });
+              noteMap[r.NoteId] = newId;
+              totalNotasAdd++;
+            }
+          });
+
+          // 4. TAG & TAGMAP
+          const tagMap = {};
+          const tagsExistentes = new Map();
+          queryAll(dbOut, "SELECT TagId, Type, Name FROM Tag").forEach(r => tagsExistentes.set(`${r.Type}|${r.Name}`, r.TagId));
+
+          queryAll(dbB, "SELECT * FROM Tag").forEach(r => {
+            const k = `${r.Type}|${r.Name}`;
+            if (tagsExistentes.has(k)) {
+              tagMap[r.TagId] = tagsExistentes.get(k);
+            } else {
+              dbOut.run("INSERT INTO Tag (Type, Name) VALUES (?, ?)", [r.Type, r.Name]);
+              const newId = getLastInsertId(dbOut);
+              tagsExistentes.set(k, newId);
+              tagMap[r.TagId] = newId;
+              totalTagsAdd++;
+            }
+          });
+
+          const tagmapsExistentes = new Set();
+          queryAll(dbOut, "SELECT PlaylistItemId, LocationId, NoteId, TagId FROM TagMap")
+            .forEach(r => tagmapsExistentes.add(`${r.PlaylistItemId}|${r.LocationId}|${r.NoteId}|${r.TagId}`));
+
+          queryAll(dbB, "SELECT * FROM TagMap").forEach(r => {
+            const novoTag = tagMap[r.TagId];
+            const novoNote = r.NoteId != null ? (noteMap[r.NoteId] ?? null) : null;
+            const novoLoc = r.LocationId != null ? (locMap[r.LocationId] ?? null) : null;
+            const sig = `${r.PlaylistItemId}|${novoLoc}|${novoNote}|${novoTag}`;
+            if (novoTag && !tagmapsExistentes.has(sig)) {
+              const pos = dbOut.exec(`SELECT COALESCE(MAX(Position), -1) + 1 FROM TagMap WHERE TagId = ${novoTag}`)[0].values[0][0];
+              dbOut.run("INSERT INTO TagMap (PlaylistItemId, LocationId, NoteId, TagId, Position) VALUES (?, ?, ?, ?, ?)",
+                [r.PlaylistItemId, novoLoc, novoNote, novoTag, pos]);
+              tagmapsExistentes.add(sig);
+            }
+          });
+
+          // 5. INPUTFIELD
+          const inputsExistentes = new Set();
+          queryAll(dbOut, "SELECT LocationId, TextTag FROM InputField").forEach(r => inputsExistentes.add(`${r.LocationId}|${r.TextTag}`));
+          queryAll(dbB, "SELECT * FROM InputField").forEach(r => {
+            const novoLoc = locMap[r.LocationId];
+            if (novoLoc != null && !inputsExistentes.has(`${novoLoc}|${r.TextTag}`)) {
+              dbOut.run("INSERT INTO InputField (LocationId, TextTag, Value) VALUES (?, ?, ?)", [novoLoc, r.TextTag, r.Value]);
+              inputsExistentes.add(`${novoLoc}|${r.TextTag}`);
+            }
+          });
+
+          // 6. BOOKMARK
+          const slotsOcupados = new Set();
+          queryAll(dbOut, "SELECT PublicationLocationId, Slot FROM Bookmark").forEach(r => slotsOcupados.add(`${r.PublicationLocationId}|${r.Slot}`));
+          queryAll(dbB, "SELECT * FROM Bookmark").forEach(r => {
+            const novoLoc = locMap[r.LocationId];
+            const novoPubLoc = locMap[r.PublicationLocationId];
+            if (novoLoc != null && novoPubLoc != null && !slotsOcupados.has(`${novoPubLoc}|${r.Slot}`)) {
+              dbOut.run("INSERT INTO Bookmark (LocationId, PublicationLocationId, Slot, Title, Snippet, BlockType, BlockIdentifier) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [novoLoc, novoPubLoc, r.Slot, r.Title, r.Snippet, r.BlockType, r.BlockIdentifier]);
+              slotsOcupados.add(`${novoPubLoc}|${r.Slot}`);
+            }
+          });
+
+          dbB.close();
+        }
+
+        const now = new Date();
+        dbOut.run("UPDATE LastModified SET LastModified = ?", [now.toISOString().slice(0, 19) + 'Z']);
+
+        const finalDbBytes = dbOut.export();
+        dbOut.close();
+
+        const hashHex = await sha256Hex(finalDbBytes);
+        const hojeStr = now.toISOString().slice(0, 10);
+        const horaStr = String(now.getHours()).padStart(2, '0') + 'h' + String(now.getMinutes()).padStart(2, '0');
+        const nomeFinal = `UserdataBackup_${hojeStr}_${horaStr}_MESCLADO.jwlibrary`;
+
+        manifestBase.name = nomeFinal.replace('.jwlibrary', '');
+        manifestBase.creationDate = hojeStr;
+        manifestBase.userDataBackup.hash = hashHex;
+        manifestBase.userDataBackup.deviceName = 'PWA_Merge';
+
+        zipOut.file('userData.db', finalDbBytes);
+        zipOut.file('manifest.json', JSON.stringify(manifestBase));
+
+        const blob = await zipOut.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = nomeFinal;
+        a.click();
+        URL.revokeObjectURL(url);
+
+        log('----------------------------------------');
+        log('✅ MESCLAGEM CONCLUÍDA COM SUCESSO!');
+        log(` + Notas novas        : ${totalNotasAdd}`);
+        log(` + Notas atualizadas  : ${totalNotasUpd}`);
+        log(` + Etiquetas novas    : ${totalTagsAdd}`);
+        log(` + Marcações novas    : ${totalUmsAdd}`);
+        log(`📥 Download iniciado  : ${nomeFinal}`);
+      } catch (err) {
+        log('❌ Erro ao processar: ' + err.message);
+      } finally {
+        mergeBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
